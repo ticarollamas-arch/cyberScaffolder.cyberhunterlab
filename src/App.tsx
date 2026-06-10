@@ -24,7 +24,8 @@ import {
   FileText, 
   ExternalLink,
   ChevronRight,
-  Info
+  Info,
+  Github
 } from 'lucide-react';
 import JSZip from 'jszip';
 
@@ -74,6 +75,137 @@ export default function App() {
 
   // Copy Feedback state
   const [copiedText, setCopiedText] = useState<string | null>(null);
+
+  // GitHub Integration States
+  const [githubToken, setGithubToken] = useState<string | null>(() => localStorage.getItem('github_token'));
+  const [showGithubModal, setShowGithubModal] = useState<boolean>(false);
+  const [githubRepoName, setGithubRepoName] = useState<string>('');
+  const [githubRepoDesc, setGithubRepoDesc] = useState<string>('');
+  const [githubRepoPrivate, setGithubRepoPrivate] = useState<boolean>(false);
+  const [isExportingGithub, setIsExportingGithub] = useState<boolean>(false);
+  const [githubExportResult, setGithubExportResult] = useState<{ success: boolean; repoUrl?: string; error?: string } | null>(null);
+
+  // Dynamic local storage for custom client credentials
+  const [customClientId, setCustomClientId] = useState<string>(() => localStorage.getItem('github_custom_client_id') || '');
+  const [customClientSecret, setCustomClientSecret] = useState<string>(() => localStorage.getItem('github_custom_client_secret') || '');
+
+  // Sync Repo Name when blueprint changes
+  useEffect(() => {
+    if (blueprint && blueprint.projectName) {
+      const normalized = blueprint.projectName
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^a-z0-9_.-]+/g, '-');
+      setGithubRepoName(normalized);
+      setGithubRepoDesc(blueprint.objective || blueprint.description || `Blueprint do projeto ${blueprint.projectName}`);
+    }
+  }, [blueprint]);
+
+  // OAuth Popup Handler
+  const handleConnectGitHub = async () => {
+    try {
+      // Build callback URI
+      const callbackUri = `${window.location.origin}/auth/callback`;
+      let url = `/api/auth/github/url?redirectUri=${encodeURIComponent(callbackUri)}`;
+      if (customClientId) {
+        url += `&clientId=${encodeURIComponent(customClientId)}`;
+      }
+      if (customClientSecret) {
+        url += `&clientSecret=${encodeURIComponent(customClientSecret)}`;
+      }
+
+      const response = await fetch(url);
+      
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error || 'Não foi possível obter a URL de autorização do GitHub. Certifique-se de que o GITHUB_CLIENT_ID e GITHUB_CLIENT_SECRET estejam configurados.');
+      }
+      
+      const { url: authUrl } = await response.json();
+      
+      // Open direct GitHub OAuth provider window
+      const authWindow = window.open(
+        authUrl,
+        'github_oauth_popup',
+        'width=600,height=750,resizable=yes,scrollbars=yes,status=yes'
+      );
+
+      if (!authWindow) {
+        alert('O popup foi bloqueado pelo seu navegador. Por favor, autorize popups para este domínio para permitir a autenticação com o GitHub.');
+      }
+    } catch (error: any) {
+      console.error(error);
+      alert(`Falha ao conectar com o GitHub:\n${error.message}`);
+    }
+  };
+
+  const handleDisconnectGitHub = () => {
+    setGithubToken(null);
+    localStorage.removeItem('github_token');
+    setGithubExportResult(null);
+  };
+
+  const handleExportGitHub = async () => {
+    if (!githubToken) return;
+    setIsExportingGithub(true);
+    setGithubExportResult(null);
+
+    try {
+      const response = await fetch('/api/github/export', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          accessToken: githubToken,
+          repoName: githubRepoName.trim(),
+          description: githubRepoDesc.trim(),
+          isPrivate: githubRepoPrivate,
+          blueprint
+        })
+      });
+
+      const resData = await response.json();
+      if (!response.ok) {
+        throw new Error(resData.error || resData.details || 'Falha ao realizar a exportação para o GitHub.');
+      }
+
+      setGithubExportResult({
+        success: true,
+        repoUrl: resData.repoUrl
+      });
+    } catch (error: any) {
+      console.error(error);
+      setGithubExportResult({
+        success: false,
+        error: error.message || String(error)
+      });
+    } finally {
+      setIsExportingGithub(false);
+    }
+  };
+
+  // Listen for popup callback events
+  useEffect(() => {
+    const handleOAuthMessage = (event: MessageEvent) => {
+      const origin = event.origin;
+      if (!origin.endsWith('.run.app') && !origin.includes('localhost') && !origin.includes('127.0.0.1')) {
+        return;
+      }
+      if (event.data?.type === 'OAUTH_AUTH_SUCCESS') {
+        const token = event.data?.accessToken;
+        if (token) {
+          setGithubToken(token);
+          localStorage.setItem('github_token', token);
+          setShowGithubModal(true); // Auto-open the configuration form overlay upon login
+        }
+      }
+    };
+
+    window.addEventListener('message', handleOAuthMessage);
+    return () => window.removeEventListener('message', handleOAuthMessage);
+  }, []);
 
   // Load preset on initial mount and when preset changes
   useEffect(() => {
@@ -174,7 +306,10 @@ export default function App() {
 
       if (!response.ok) {
         const errData = await response.json().catch(() => ({}));
-        throw new Error(errData.error || errData.details || 'Falha na comunicação.');
+        const errorMessage = errData.error && errData.details
+          ? `${errData.error}\nDetalhes: ${errData.details}`
+          : (errData.error || errData.details || 'Falha na comunicação.');
+        throw new Error(errorMessage);
       }
 
       setAiStep('Recebendo e higienizando a árvore de diretórios do projeto...');
@@ -490,14 +625,28 @@ export default function App() {
               </p>
             </div>
             
-            <button
-              id="zip-download-btn"
-              onClick={handleDownloadZip}
-              className="bg-emerald-600 hover:bg-emerald-500 text-emerald-50 px-4 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 shadow-lg shadow-emerald-900/20 active:scale-95 transition"
-            >
-              <Download className="w-4 h-4 text-emerald-50" />
-              Baixar Projeto Completo (.ZIP)
-            </button>
+            <div className="flex flex-wrap gap-2">
+              <button
+                id="github-export-modal-btn"
+                onClick={() => {
+                  setGithubExportResult(null);
+                  setShowGithubModal(true);
+                }}
+                className="bg-[#24292e] hover:bg-[#2f363d] text-white px-4 py-2 font-semibold rounded-lg text-xs flex items-center gap-2 transition duration-150 border border-[#444c56] shadow-md active:scale-95 shrink-0"
+              >
+                <Github className="w-4 h-4 text-slate-200" />
+                <span>{githubToken ? "Exportar para o GitHub" : "Conectar GitHub"}</span>
+              </button>
+
+              <button
+                id="zip-download-btn"
+                onClick={handleDownloadZip}
+                className="bg-emerald-600 hover:bg-emerald-500 text-emerald-50 px-4 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 shadow-lg shadow-emerald-900/20 active:scale-95 transition"
+              >
+                <Download className="w-4 h-4 text-emerald-50" />
+                Baixar Projeto Completo (.ZIP)
+              </button>
+            </div>
           </div>
 
           {/* Navigation Tabs */}
@@ -1070,10 +1219,268 @@ export default function App() {
           <div className="text-slate-600 flex items-center gap-1.5">
             <span>AI Studio Cloud App</span>
             <span>•</span>
-            <span>Local Time: 13:00 UTC</span>
+            <span>Integrado com GitHub</span>
           </div>
         </div>
       </footer>
+
+      {/* 5. GITHUB DEPLOYMENT / EXPORT OVERLAY MODAL */}
+      {showGithubModal && (
+        <div className="fixed inset-0 bg-slate-950/85 backdrop-blur-sm z-50 flex items-center justify-center p-4 overflow-y-auto animate-fade-in">
+          <div className="bg-[#0f172a] border border-slate-800 rounded-xl p-6 max-w-lg w-full shadow-2xl relative flex flex-col gap-4 text-left">
+            
+            {/* Header */}
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-slate-800 rounded-lg">
+                  <Github className="w-5 h-5 text-slate-100" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white font-display">Exportar para o GitHub</h3>
+                  <p className="text-[10px] text-slate-400 font-mono">Conexão descompactada via API oficial</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowGithubModal(false)}
+                className="text-slate-400 hover:text-white font-bold p-1 bg-slate-800/40 hover:bg-slate-800/85 rounded transition"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Display Results */}
+            {!githubToken ? (
+              /* Disconnected Status: Instructions & local custom credentials form */
+              <div className="flex flex-col gap-4 py-1">
+                <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col gap-3">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-2 h-2 bg-amber-500 rounded-full animate-pulse" />
+                    <span className="text-[11px] font-mono font-bold text-amber-500 uppercase tracking-wider">Apenas mais um passo</span>
+                  </div>
+                  <p className="text-xs text-slate-400 leading-relaxed text-left">
+                    Conecte a sua conta do GitHub para que possamos empacotar cada arquivo do blueprint de segurança de forma descompactada técnica no seu perfil.
+                  </p>
+                  
+                  <button
+                    onClick={handleConnectGitHub}
+                    className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold py-2.5 px-4 rounded-lg flex items-center justify-center gap-2 mt-1.5 transition active:scale-95 shadow-lg shadow-indigo-950/40"
+                  >
+                    <Github className="w-4 h-4 text-white" />
+                    Autorizar e Conectar Conta GitHub
+                  </button>
+                </div>
+                
+                {/* Advanced Local Config inputs */}
+                <div className="bg-slate-950/45 border border-slate-850 p-4 rounded-lg space-y-3">
+                  <span className="text-[10px] text-slate-350 font-semibold uppercase tracking-wider block">Credenciais OAuth Locais (Opcional)</span>
+                  <p className="text-[10px] text-slate-500 leading-normal">
+                    Se você preferir usar as suas próprias credenciais do GitHub sem precisar cadastrar variáveis de ambiente no painel do AI Studio, basta inseri-las abaixo:
+                  </p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    <div className="space-y-1">
+                      <label className="text-[9px] text-slate-450 font-mono block">GITHUB_CLIENT_ID</label>
+                      <input
+                        type="text"
+                        value={customClientId}
+                        onChange={e => {
+                          const val = e.target.value.trim();
+                          setCustomClientId(val);
+                          localStorage.setItem('github_custom_client_id', val);
+                        }}
+                        placeholder="Ex: Iv1.1a2b3c..."
+                        className="w-full bg-[#0b0f19] border border-slate-800 rounded p-2 text-xs text-white font-mono focus:outline-none focus:border-indigo-500"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[9px] text-slate-450 font-mono block">GITHUB_CLIENT_SECRET</label>
+                      <input
+                        type="password"
+                        value={customClientSecret}
+                        onChange={e => {
+                          const val = e.target.value.trim();
+                          setCustomClientSecret(val);
+                          localStorage.setItem('github_custom_client_secret', val);
+                        }}
+                        placeholder="Ex: 8f9a2b..."
+                        className="w-full bg-[#0b0f19] border border-slate-800 rounded p-2 text-xs text-white font-mono focus:outline-none focus:border-indigo-500"
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ) : githubExportResult ? (
+              <div className="flex flex-col gap-4 py-2">
+                {githubExportResult.success ? (
+                  <div className="bg-emerald-950/30 border border-emerald-900/50 p-4 rounded-lg flex flex-col items-center text-center gap-3">
+                    <CheckCircle2 className="w-10 h-10 text-emerald-400 animate-bounce" />
+                    <div className="space-y-1">
+                      <h4 className="text-sm font-semibold text-white">Repositório Criado com Sucesso!</h4>
+                      <p className="text-xs text-slate-400 leading-relaxed max-w-xs">
+                        Todos os arquivos do seu Blueprint de segurança foram desempacotados e commitados no GitHub de forma modular.
+                      </p>
+                    </div>
+                    
+                    <a
+                      href={githubExportResult.repoUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold px-4 py-2.5 rounded-lg flex items-center gap-2 mt-1 transition shadow-lg shadow-emerald-950/40"
+                    >
+                      <ExternalLink className="w-4 h-4 text-white" />
+                      Visualizar no GitHub
+                    </a>
+                  </div>
+                ) : (
+                  <div className="bg-rose-950/30 border border-rose-900/50 p-4 rounded-lg flex flex-col gap-2">
+                    <div className="flex items-center gap-2 text-rose-400">
+                      <AlertTriangle className="w-4.5 h-4.5" />
+                      <h4 className="text-xs font-bold uppercase tracking-wider">Falha na Exportação</h4>
+                    </div>
+                    <p className="text-xs text-slate-300 leading-relaxed">{githubExportResult.error}</p>
+                    <div className="text-[10px] text-slate-500 bg-slate-950/45 p-2 rounded mt-1 font-mono">
+                      Dica: Se receber erro de autenticação ou chaves inválidas (401/403), certifique-se de configurar e autorizar o app oficial e re-conectar sua conta.
+                    </div>
+                  </div>
+                )}
+
+                <div className="flex justify-end gap-2 border-t border-slate-800 pt-3.5 mt-2">
+                  <button
+                    onClick={handleDisconnectGitHub}
+                    className="text-xs font-medium text-rose-450 hover:bg-rose-950/20 border border-rose-950/40 px-3 py-2 rounded-lg transition"
+                  >
+                    Desconectar GitHub
+                  </button>
+                  <button
+                    onClick={() => {
+                      setGithubExportResult(null);
+                      setShowGithubModal(false);
+                    }}
+                    className="text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 px-4 py-2 rounded-lg transition"
+                  >
+                    Concluir
+                  </button>
+                </div>
+              </div>
+            ) : (
+              /* Config parameters form */
+              <div className="flex flex-col gap-3.5">
+                <div className="space-y-1.5">
+                  <label className="text-xs font-semibold text-slate-300 block">Nome do Repositório</label>
+                  <div className="flex items-center bg-[#0b0f19] border border-slate-850 rounded-lg overflow-hidden focus-within:border-indigo-505">
+                    <span className="text-[11px] text-slate-500 px-3 py-2 border-r border-slate-800 select-none font-mono">github.com / seu-usuario /</span>
+                    <input
+                      type="text"
+                      value={githubRepoName}
+                      onChange={e => setGithubRepoName(e.target.value.toLowerCase().replace(/[^a-z0-9_.-]/g, '-'))}
+                      placeholder="nome-do-repositorio"
+                      className="flex-1 bg-transparent border-0 outline-none p-2 text-xs text-white font-mono"
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-xs font-semibold text-slate-300 block">Descrição (Opcional)</label>
+                  <textarea
+                    rows={3}
+                    value={githubRepoDesc}
+                    onChange={e => setGithubRepoDesc(e.target.value)}
+                    placeholder="Uma descrição técnica explicando as conformidades e higiene digital mapeadas pela ferramenta."
+                    className="w-full bg-[#0b0f19] border border-slate-800 rounded-lg p-2.5 text-xs text-slate-300 focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+
+                <div className="bg-slate-950/40 border border-slate-850/60 p-3 rounded-lg flex items-center justify-between">
+                  <div>
+                    <span className="text-xs font-semibold text-slate-200 block">Repositório Privado?</span>
+                    <span className="text-[10px] text-slate-500 block leading-normal">Se marcado, apenas você terá acesso ao código gerado.</span>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={githubRepoPrivate}
+                    onChange={e => setGithubRepoPrivate(e.target.checked)}
+                    className="w-4 h-4 text-indigo-600 bg-slate-900 border-slate-800 rounded select-none shrink-0"
+                  />
+                </div>
+
+                {/* Progress / Actions */}
+                {isExportingGithub ? (
+                  <div className="bg-[#0b0f19] border border-slate-800/80 p-4 rounded-lg flex items-center gap-3 py-4 text-left">
+                    <RefreshCw className="w-5 h-5 text-indigo-400 animate-spin shrink-0" />
+                    <div>
+                      <span className="text-xs font-semibold text-slate-200 block">Exportando Blueprint...</span>
+                      <span className="text-[10px] text-slate-500 block">Criando repositório e enviando arquivos descompactados um de cada vez de forma resiliente...</span>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex flex-col sm:flex-row justify-between items-center gap-2.5 border-t border-slate-800 pt-4 mt-2">
+                    <button
+                      onClick={handleDisconnectGitHub}
+                      className="text-xs font-medium text-slate-500 hover:text-rose-400 self-start sm:self-center transition"
+                      title="Sair da sessão do GitHub"
+                    >
+                      Desconectar Conta
+                    </button>
+                    
+                    <div className="flex gap-2 w-full sm:w-auto overflow-hidden justify-end">
+                      <button
+                        onClick={() => setShowGithubModal(false)}
+                        className="text-xs font-semibold text-slate-300 bg-slate-800/50 hover:bg-slate-800 px-4 py-2 rounded-lg transition"
+                      >
+                        Cancelar
+                      </button>
+                      <button
+                        onClick={handleExportGitHub}
+                        disabled={!githubRepoName.trim()}
+                        className="text-xs font-semibold text-indigo-100 bg-indigo-600 hover:bg-indigo-500 px-4 py-2 rounded-lg transition disabled:opacity-50"
+                      >
+                        Exportar Descompactado
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Config Instructions */}
+            <div className="border-t border-slate-800/60 pt-3">
+              <details className="text-[11px] text-slate-550 cursor-pointer select-none">
+                <summary className="hover:text-slate-400 font-mono">Deseja usar suas próprias credenciais OAuth? Ver instruções de Callback URL</summary>
+                <div className="p-2.5 mt-2 bg-[#0b0f19]/80 rounded border border-slate-800 space-y-2 text-left leading-relaxed">
+                  <p className="text-[11px] text-amber-500/90 font-semibold">⚠️ AVISO DE REDIRECT_URI:</p>
+                  <p className="text-[10.5px] text-slate-400">
+                    O erro <code>"redirect_uri não está associado a este aplicativo"</code> significa que a URL configurada no seu aplicativo GitHub não coincide exatamente com a URL desta página.
+                  </p>
+                  
+                  <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block mt-1">URLs para configurar no Cadastro do GitHub:</span>
+                  <div className="space-y-1.5 text-[10px]">
+                    <div>
+                      <span className="text-slate-500 block">Se estiver editando o app (Workspace):</span>
+                      <code className="text-indigo-400 p-0.5 bg-slate-950 rounded select-all block break-all w-full mt-0.5">
+                        {window.location.origin.includes('ais-dev') ? window.location.origin : 'https://ais-dev-' + window.location.origin.split('-')[2] + '-' + window.location.origin.split('-')[3] + '-' + window.location.origin.split('-')[4].split('.')[0] + '.us-west2.run.app'}/auth/callback
+                      </code>
+                    </div>
+                    <div>
+                      <span className="text-slate-500 block">Se estiver visualizando o preview público (Share Link):</span>
+                      <code className="text-indigo-400 p-0.5 bg-slate-950 rounded select-all block break-all w-full mt-0.5">
+                        {window.location.origin.includes('ais-pre') ? window.location.origin : 'https://ais-pre-' + window.location.origin.split('-')[2].replace('dev', 'pre') + '-' + window.location.origin.split('-')[3] + '-' + window.location.origin.split('-')[4].split('.')[0] + '.us-west2.run.app'}/auth/callback
+                      </code>
+                    </div>
+                    <div>
+                      <span className="text-slate-500 block">URL de Callback dessa aba atual (Recomendada agora):</span>
+                      <code className="text-emerald-400 p-0.5 bg-slate-950 rounded select-all block break-all w-full mt-0.5">
+                        {window.location.origin}/auth/callback
+                      </code>
+                    </div>
+                  </div>
+
+                  <p className="border-t border-slate-800/80 pt-2 mt-2">Dica: Copie o endereço verde acima e insira-o no campo <strong>Authorization Callback URL</strong> nas <a href="https://github.com/settings/developers" target="_blank" rel="noopener" className="text-indigo-400 hover:underline">Configurações de Desenvolvedor do GitHub</a>.</p>
+                </div>
+              </details>
+            </div>
+
+          </div>
+        </div>
+      )}
     </div>
   );
 }
