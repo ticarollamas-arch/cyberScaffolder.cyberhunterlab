@@ -7,6 +7,8 @@ export interface BlueprintMetadata {
   language?: string;
   ethicalFramework?: string;
   complianceStandard?: string;
+  isLocalFallback?: boolean;
+  fallbackExplanation?: string;
 }
 
 export interface TechnologyLibrary {
