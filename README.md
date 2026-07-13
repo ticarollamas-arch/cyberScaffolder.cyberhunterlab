@@ -145,7 +145,7 @@ npm start
 
 ---
 
-## 🏆 Alinhamento com a Entrevista de Amazon Solutions Architect
+
 
 Este projeto foi desenhado sob medida para demonstrar as principais competências exigidas de um **Solutions Architect (SA) na Amazon Web Services**:
 
